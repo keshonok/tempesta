@@ -1102,7 +1102,7 @@ tfw_apm_del_srv(TfwServer *srv)
 #define TFW_APM_MIN_TMINTRVL	5	/* Minimum time interval (secs). */
 
 static int
-tfw_apm_cfg_start(void)
+tfw_apm_start(void)
 {
 	int cpu;
 	unsigned int jtmwindow;
@@ -1161,7 +1161,7 @@ tfw_apm_cfg_start(void)
 }
 
 static void
-tfw_apm_cfg_stop(void)
+tfw_apm_stop(void)
 {
 	int cpu;
 	TfwApmData *data, *tmp;
@@ -1229,7 +1229,7 @@ tfw_handle_apm_stats(TfwCfgSpec *cs, TfwCfgEntry *ce)
 	return 0;
 }
 
-static TfwCfgSpec tfw_apm_cfg_specs[] = {
+static TfwCfgSpec tfw_apm_specs[] = {
 	{
 		"apm_stats", NULL,
 		tfw_handle_apm_stats,
@@ -1237,12 +1237,25 @@ static TfwCfgSpec tfw_apm_cfg_specs[] = {
 		.allow_repeat = false,
 		.cleanup  = tfw_apm_cfg_cleanup,
 	},
-	{}
+	{ 0 }
 };
 
-TfwCfgMod tfw_apm_cfg_mod = {
-	.name  = "apm",
-	.start = tfw_apm_cfg_start,
-	.stop = tfw_apm_cfg_stop,
-	.specs = tfw_apm_cfg_specs,
+TfwMod tfw_apm_mod = {
+	.name	= "apm",
+	.start	= tfw_apm_start,
+	.stop	= tfw_apm_stop,
+	.specs	= tfw_apm_specs,
 };
+
+int
+tfw_apm_init(void)
+{
+	tfw_mod_register(&tfw_apm_mod);
+	return 0;
+}
+
+void
+tfw_apm_exit(void)
+{
+	tfw_mod_unregister(&tfw_apm_mod);
+}
