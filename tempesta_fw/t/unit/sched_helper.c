@@ -73,6 +73,8 @@ test_start_sg(TfwSrvGroup *sg, const char *sched_name, unsigned int flags)
 	kernel_fpu_end();
 
 	sg->flags = flags;
+	r = tfw_sg_add(sg);
+	BUG_ON(r);
 	r = tfw_sg_set_sched(sg, sched_name);
 	BUG_ON(r);
 
@@ -103,7 +105,7 @@ test_create_srv(const char *in_addr, TfwSrvGroup *sg)
 	srv = tfw_server_create(&addr);
 	BUG_ON(!srv);
 
-	tfw_sg_add(sg, srv);
+	tfw_sg_add_srv(sg, srv);
 
 	return srv;
 }
