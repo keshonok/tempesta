@@ -173,14 +173,21 @@ static TfwStr g_crlf = { .ptr = S_CRLF, .len = SLEN(S_CRLF) };
 
 /*
  * The mask of non-cacheable methods per RFC 7231 4.2.3.
- * Currently none of the non-cacheable methods are supported.
- * Note: POST method is cacheable but not supported at this time.
+ * Safe methods that do not depend on a current or authoritative response
+ * are defined as cacheable: GET, HEAD, and POST.
+ * Note: caching of POST method responces is not supported at this time.
+ * Issue #506 describes, which steps must be made to support caching of POST
+ * requests.
  */
-static unsigned int tfw_cache_nc_methods = (1 << TFW_HTTP_METH_POST);
+static unsigned int tfw_cache_nc_methods =
+		~((1 << TFW_HTTP_METH_GET) | (1 << TFW_HTTP_METH_HEAD));
 
 static inline bool
 __cache_method_nc_test(tfw_http_meth_t method)
 {
+	BUILD_BUG_ON(sizeof(tfw_cache_nc_methods) * BITS_PER_BYTE
+		     < _TFW_HTTP_METH_COUNT);
+
 	return tfw_cache_nc_methods & (1 << method);
 }
 
@@ -845,7 +852,7 @@ static void
 __cache_add_node(TDB *db, TfwHttpResp *resp, TfwHttpReq *req,
 		 unsigned long key)
 {
-	TfwCacheEntry *ce, cdata = {{}};
+	TfwCacheEntry *ce;
 	size_t data_len = __cache_entry_size(resp, req);
 	size_t len = data_len;
 
@@ -854,8 +861,8 @@ __cache_add_node(TDB *db, TfwHttpResp *resp, TfwHttpReq *req,
 	 * TDB should provide enough space to place at least head of
 	 * the record key at first chunk.
 	 */
-	ce = (TfwCacheEntry *)tdb_entry_create(db, key, &cdata.ce_body, &len);
-	BUG_ON(len <= sizeof(cdata));
+	ce = (TfwCacheEntry *)tdb_entry_alloc(db, key, &len);
+	BUG_ON(len <= sizeof(TfwCacheEntry));
 	if (!ce)
 		return;
 
@@ -874,8 +881,6 @@ tfw_cache_add(TfwHttpResp *resp, TfwHttpReq *req, tfw_http_cache_cb_t action)
 	unsigned long key;
 	bool keep_skb = false;
 
-	if (!tfw_cache_msg_cacheable(req))
-		goto out;
 	if (!tfw_cache_employ_resp(req, resp))
 		goto out;
 
@@ -1070,15 +1075,13 @@ tfw_cache_build_resp_body(TDB *db, TfwHttpResp *resp, TdbVRec *trec,
 					   off, f_size);
 			skb_frag_ref(it->skb, it->frag);
 			ss_skb_adjust_data_len(it->skb, f_size);
-		} else {
-			p = NULL;
-		}
-		if (__tfw_http_msg_add_str_data((TfwHttpMsg *)resp,
-						&resp->body, p, f_size,
-						it->skb))
-			return - ENOMEM;
 
-		++it->frag;
+			if (__tfw_http_msg_add_str_data((TfwHttpMsg *)resp,
+							&resp->body, p, f_size,
+							it->skb))
+				return - ENOMEM;
+			++it->frag;
+		}
 		if (!(trec = tdb_next_rec_chunk(db, trec)))
 			break;
 		BUG_ON(trec && !f_size);
@@ -1393,30 +1396,46 @@ tfw_cache_stop(void)
 		tdb_close(c_nodes[i].db);
 }
 
+static const TfwCfgEnum cache_http_methods_enum[] = {
+	{ "copy",	TFW_HTTP_METH_COPY },
+	{ "delete",	TFW_HTTP_METH_DELETE },
+	{ "get",	TFW_HTTP_METH_GET },
+	{ "head",	TFW_HTTP_METH_HEAD },
+	{ "lock",	TFW_HTTP_METH_LOCK },
+	{ "mkcol",	TFW_HTTP_METH_MKCOL },
+	{ "move",	TFW_HTTP_METH_MOVE },
+	{ "options",	TFW_HTTP_METH_OPTIONS },
+	{ "patch",	TFW_HTTP_METH_PATCH },
+	{ "post",	TFW_HTTP_METH_POST },
+	{ "propfind",	TFW_HTTP_METH_PROPFIND },
+	{ "proppatch",	TFW_HTTP_METH_PROPPATCH },
+	{ "put",	TFW_HTTP_METH_PUT },
+	{ "trace",	TFW_HTTP_METH_TRACE },
+	{ "unlock",	TFW_HTTP_METH_UNLOCK },
+	/* Unknown methods can't be cached. */
+	{}
+};
+
 static int
 tfw_cfgop_cache_methods(TfwCfgSpec *cs, TfwCfgEntry *ce)
 {
 	unsigned int i, method;
 	const char *val;
 
-	BUILD_BUG_ON(sizeof(cache_cfg.methods) * 8 < _TFW_HTTP_METH_COUNT);
+	BUILD_BUG_ON(sizeof(cache_cfg.methods) * BITS_PER_BYTE
+		     < _TFW_HTTP_METH_COUNT);
+	BUILD_BUG_ON(sizeof(method) * BITS_PER_BYTE < _TFW_HTTP_METH_COUNT);
 
 	TFW_CFG_ENTRY_FOR_EACH_VAL(ce, i, val) {
-		if (!strcasecmp(val, "GET")) {
-			method = TFW_HTTP_METH_GET;
-		} else if (!strcasecmp(val, "HEAD")) {
-			method = TFW_HTTP_METH_HEAD;
-		} else if (!strcasecmp(val, "POST")) {
-			method = TFW_HTTP_METH_POST;
-		} else {
+		if (tfw_cfg_map_enum(cache_http_methods_enum, val, &method)) {
 			TFW_ERR_NL("%s: unsupported method: '%s'\n",
 				   cs->name, val);
 			return -EINVAL;
 		}
 		if (__cache_method_nc_test(method)) {
-			TFW_ERR_NL("%s: non-cacheable method: '%s'\n",
+			TFW_WARN_NL("%s: non-cacheable method '%s' is set "
+				    "as cacheable\n",
 				   cs->name, val);
-			return -EINVAL;
 		}
 		if (__cache_method_test(method)) {
 			TFW_WARN_NL("%s: duplicate method: '%s'\n",

@@ -24,7 +24,7 @@
 #include "str.h"
 
 /* Mappings for match operators. */
-static TfwCfgEnum const __read_mostly tfw_match_enum[] = {
+static const TfwCfgEnum tfw_match_enum[] = {
 	{ "*",		TFW_HTTP_MATCH_O_WILDCARD },
 	{ "eq",		TFW_HTTP_MATCH_O_EQ },
 	{ "prefix",	TFW_HTTP_MATCH_O_PREFIX },
@@ -33,12 +33,25 @@ static TfwCfgEnum const __read_mostly tfw_match_enum[] = {
 };
 
 /* Mappings for HTTP request methods. */
-static TfwCfgEnum const __read_mostly tfw_method_enum[] = {
+static const TfwCfgEnum tfw_method_enum[] = {
 	{ "*",		UINT_MAX },
+	{ "COPY",	1 << TFW_HTTP_METH_COPY },
+	{ "DELETE",	1 << TFW_HTTP_METH_DELETE },
 	{ "GET",	1 << TFW_HTTP_METH_GET },
 	{ "HEAD",	1 << TFW_HTTP_METH_HEAD },
+	{ "LOCK",	1 << TFW_HTTP_METH_LOCK },
+	{ "MKCOL",	1 << TFW_HTTP_METH_MKCOL },
+	{ "MOVE",	1 << TFW_HTTP_METH_MOVE },
+	{ "OPTIONS",	1 << TFW_HTTP_METH_OPTIONS },
+	{ "PATCH",	1 << TFW_HTTP_METH_PATCH },
 	{ "POST",	1 << TFW_HTTP_METH_POST },
+	{ "PROPFIND",	1 << TFW_HTTP_METH_PROPFIND },
+	{ "PROPPATCH",	1 << TFW_HTTP_METH_PROPPATCH },
+	{ "PUT",	1 << TFW_HTTP_METH_PUT },
+	{ "TRACE",	1 << TFW_HTTP_METH_TRACE },
+	{ "UNLOCK",	1 << TFW_HTTP_METH_UNLOCK, },
 	{ "PURGE",	1 << TFW_HTTP_METH_PURGE },
+	{ "unknown",	1 << _TFW_HTTP_METH_UNKNOWN },
 	{ 0 }
 };
 
@@ -105,7 +118,7 @@ static TfwAddr		tfw_capuacl[TFW_CAPUACL_ARRAY_SZ];
  * Note that @loc_dflt in the default vhost serves as global
  * default caching policy.
  */
-static char const __read_mostly s_hdr_via_dflt[] =
+static const char s_hdr_via_dflt[] =
 	"tempesta_fw" " (" TFW_NAME " " TFW_VERSION ")";
 
 static TfwVhost		tfw_vhost_dflt = {
@@ -174,7 +187,7 @@ __tfw_match_prefix(tfw_match_t op, const char *cstr, size_t len, TfwStr *arg)
 
 typedef bool (*__tfw_match_fn)(tfw_match_t, const char *, size_t, TfwStr *);
 
-static __tfw_match_fn const __read_mostly __tfw_match_fn_tbl[] = {
+static const __tfw_match_fn __tfw_match_fn_tbl[] = {
 	[0 ... _TFW_HTTP_MATCH_O_COUNT] = NULL,
 	[TFW_HTTP_MATCH_O_WILDCARD]	= __tfw_match_wildcard,
 	[TFW_HTTP_MATCH_O_EQ]		= __tfw_match_eq,
@@ -394,6 +407,8 @@ tfw_cfgop_nonidempotent(TfwCfgSpec *cs, TfwCfgEntry *ce)
 	TfwLocation *loc = tfwcfg_this_location;
 	TfwNipDef *nipdef;
 
+	BUILD_BUG_ON(sizeof(tfw_method_enum[0].value) * BITS_PER_BYTE
+		     < _TFW_HTTP_METH_COUNT);
 	BUG_ON(!tfwcfg_this_location);
 
 	if (ce->attr_n) {
