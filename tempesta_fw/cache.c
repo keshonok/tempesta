@@ -1340,6 +1340,8 @@ tfw_cache_start(void)
 	int i, r = 1;
 	TfwVhost *vhost = tfw_vhost_get_default();
 
+	if (tfw_runstate_is_reconfig())
+		return 0;
 	if (!(cache_cfg.cache || vhost->cache_purge))
 		return 0;
 
@@ -1379,6 +1381,8 @@ tfw_cache_stop(void)
 {
 	int i;
 
+	if (tfw_runstate_is_reconfig())
+		return;
 	if (!cache_cfg.cache)
 		return;
 

@@ -774,6 +774,8 @@ tfw_cfgop_sess_lifetime(TfwCfgSpec *cs, TfwCfgEntry *ce)
 static int
 tfw_http_sess_start(void)
 {
+	if (tfw_runstate_is_reconfig())
+		return 0;
 	tfw_cfg_sticky.enabled = !TFW_STR_EMPTY(&tfw_cfg_sticky.name);
 
 	return 0;
@@ -782,6 +784,8 @@ tfw_http_sess_start(void)
 static void
 tfw_http_sess_stop(void)
 {
+	if (tfw_runstate_is_reconfig())
+		return;
 	tfw_cfg_sticky.enabled = 0;
 }
 
