@@ -1014,6 +1014,7 @@ TEST(tfw_cfg_handle_children, propagates_cleanup_to_nested_specs)
 			&call_ctr,
 			&cleanup_ctr,
 			.cleanup = cleanup_incr_ctr,
+			.allow_none = true,
 			.allow_repeat = true
 		},
 		{ 0 }
