@@ -249,10 +249,10 @@ tfw_sg_release(TfwSrvGroup *sg)
 {
 	TfwServer *srv, *srv_tmp;
 
-	list_for_each_entry_safe(srv, srv_tmp, &sg->srv_list, list)
-		tfw_server_destroy(srv);
 	if (sg->sched && sg->sched->del_grp)
 		sg->sched->del_grp(sg);
+	list_for_each_entry_safe(srv, srv_tmp, &sg->srv_list, list)
+		tfw_server_destroy(srv);
 	kfree(sg);
 }
 
