@@ -619,12 +619,19 @@ TfwCfgMod tfw_sock_clnt_cfg_mod  = {
  *	init/exit
  * ------------------------------------------------------------------------
  */
+extern int tfw_msgtrc_init(void);
+extern void tfw_msgtrc_exit(void);
 
 int
 tfw_sock_clnt_init(void)
 {
+	int r;
+
 	BUG_ON(tfw_cli_conn_cache);
 	BUG_ON(tfw_tls_conn_cache);
+
+	if ((r = tfw_msgtrc_init()))
+		return r;
 
 	tfw_cli_conn_cache = kmem_cache_create("tfw_cli_conn_cache",
 					       sizeof(TfwCliConn), 0, 0, NULL);
@@ -645,6 +652,7 @@ tfw_sock_clnt_init(void)
 void
 tfw_sock_clnt_exit(void)
 {
+	tfw_msgtrc_exit();
 	kmem_cache_destroy(tfw_tls_conn_cache);
 	kmem_cache_destroy(tfw_cli_conn_cache);
 }

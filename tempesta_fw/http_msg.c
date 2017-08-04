@@ -44,6 +44,7 @@ __http_msg_hdr_val(TfwStr *hdr, unsigned id, TfwStr *val, bool client)
 		[TFW_HTTP_HDR_USER_AGENT] = SLEN("User-Agent:"),
 		[TFW_HTTP_HDR_SERVER]	= SLEN("Server:"),
 		[TFW_HTTP_HDR_COOKIE]	= SLEN("Cookie:"),
+		[TFW_HTTP_HDR_Z_TFW_SEQNUM] = SLEN("Z-Tfw-SeqNum:"),
 	};
 
 	TfwStr *c, *end;

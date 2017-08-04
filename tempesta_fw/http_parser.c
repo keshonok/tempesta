@@ -408,6 +408,50 @@ __try_str(TfwStr *hdr, TfwStr* chunk, unsigned char *p, size_t len,
 }
 
 /**
+ * Parse probably chunked string representation of an decimal long integer.
+ * @return number of parsed bytes.
+ */
+static int
+parse_long_a(unsigned char *data, size_t len, const unsigned long *delimiter_a,
+	    unsigned long *acc)
+{
+	unsigned char *p;
+
+	for (p = data; p - data < len; ++p) {
+		if (unlikely(IN_ALPHABET(*p, delimiter_a)))
+			return p - data;
+		if (unlikely(!isdigit(*p)))
+			return CSTR_NEQ;
+		if (unlikely(*acc > (ULONG_MAX - 10) / 10))
+			return CSTR_BADLEN;
+		*acc = *acc * 10 + *p - '0';
+	}
+
+	return CSTR_POSTPONE;
+}
+
+/**
+ * Parse a long integer followed by a white space.
+ */
+static inline int
+parse_long_ws(unsigned char *data, size_t len, unsigned long *acc)
+{
+	/*
+	 * Standard white-space characters are:
+	 * ' '  (0x20) space (SPC)
+	 * '\t' (0x09) horizontal tab (TAB)
+	 * '\n' (0x0a) newline (LF)
+	 * '\v' (0x0b) vertical tab (VT)
+	 * '\f' (0x0c) feed (FF)
+	 * '\r' (0x0d) carriage return (CR)
+	 */
+	static const unsigned long whitespace_a[] ____cacheline_aligned = {
+		0x0000000100003e00UL, 0, 0, 0
+	};
+	return parse_long_a(data, len, whitespace_a, acc);
+}
+
+/**
  * Parse probably chunked string representation of an decimal integer.
  * @return number of parsed bytes.
  */
@@ -667,6 +711,9 @@ enum {
 	I_TransEncod, /* Transfer-Encoding */
 	I_TransEncodChunked,
 	I_TransEncodOther,
+	I_ZTfwSeqNum,
+	I_ZTfwSeqNumConn,
+	I_ZTfwSeqNumPair,
 
 	I_EoT, /* end of term */
 };
@@ -1335,6 +1382,67 @@ done:
 	return r;
 }
 
+static int
+__parse_z_tfw_seqnum(TfwHttpMsg *hm, unsigned char *data, size_t len)
+{
+	int r = CSTR_NEQ;
+	__FSM_DECLARE_VARS(hm);
+
+	__FSM_START(parser->_i_st) {
+
+	__FSM_STATE(I_ZTfwSeqNum) {
+		if (!(msg->flags & TFW_HTTP_SEQNUM_CONN))
+			__FSM_I_JMP(I_ZTfwSeqNumConn);
+		if (!(msg->flags & TFW_HTTP_SEQNUM_REQ))
+			__FSM_I_JMP(I_ZTfwSeqNumPair);
+		return CSTR_NEQ;
+	}
+
+	__FSM_STATE(I_ZTfwSeqNumConn) {
+		__fsm_sz = __data_remain(p);
+		__fsm_n = parse_long_ws(p, __fsm_sz, &parser->_acc);
+		if (__fsm_n == CSTR_POSTPONE)
+			__msg_hdr_chunk_fixup(data, len);
+		if (__fsm_n < 0)
+			return __fsm_n;
+		msg->flags |= TFW_HTTP_SEQNUM_CONN;
+		msg->seqnum_conn = parser->_acc;
+		parser->_acc = 0;
+		__FSM_I_MOVE_n(I_EoT, __fsm_n);
+	}
+
+	__FSM_STATE(I_ZTfwSeqNumPair) {
+		__fsm_sz = __data_remain(p);
+		__fsm_n = parse_long_ws(p, __fsm_sz, &parser->_acc);
+		if (__fsm_n == CSTR_POSTPONE)
+			__msg_hdr_chunk_fixup(data, len);
+		if (__fsm_n < 0)
+			return __fsm_n;
+		msg->flags |= TFW_HTTP_SEQNUM_REQ;
+		msg->seqnum_req = parser->_acc;
+		parser->_acc = 0;
+		__FSM_I_MOVE_n(I_EoT, __fsm_n);
+	}
+
+	/* End of token. */
+	__FSM_STATE(I_EoT) {
+		if (IS_WS(c))
+			__FSM_I_MOVE(I_EoT);
+		if (IS_TOKEN(c))
+			__FSM_I_MOVE_n(I_ZTfwSeqNum, 0);
+		if (IS_CRLF(c)) {
+			if ((msg->flags & TFW_HTTP_SEQNUM) == TFW_HTTP_SEQNUM)
+				return __data_off(p);
+			return CSTR_NEQ;
+		}
+		return CSTR_NEQ;
+	}
+
+	} /* FSM END */
+done:
+	return r;
+}
+
 /*
  * ------------------------------------------------------------------------
  *	HTTP request parsing
@@ -1560,6 +1668,19 @@ enum {
 	Req_HdrX_Forwarded_Fo,
 	Req_HdrX_Forwarded_For,
 	Req_HdrX_Forwarded_ForV,
+	Req_HdrZ,
+	Req_HdrZ_,
+	Req_HdrZ_T,
+	Req_HdrZ_Tf,
+	Req_HdrZ_Tfw,
+	Req_HdrZ_Tfw_,
+	Req_HdrZ_Tfw_S,
+	Req_HdrZ_Tfw_Se,
+	Req_HdrZ_Tfw_Seq,
+	Req_HdrZ_Tfw_SeqN,
+	Req_HdrZ_Tfw_SeqNu,
+	Req_HdrZ_Tfw_SeqNum,
+	Req_HdrZ_Tfw_SeqNumV,
 	/* Body */
 	/* URI normalization. */
 	Req_UriNorm,
@@ -2615,6 +2736,19 @@ tfw_http_parse_req(void *req_data, unsigned char *data, size_t len)
 				__FSM_MOVE_n(RGen_OWS, 11);
 			}
 			__FSM_MOVE(Req_HdrU);
+		case 'z':
+			if (likely(__data_available(p, 13)
+				   && *(p + 1) == '-'
+				   && *(p + 5) == '-'
+				   && *(p + 12) == ':'
+				   && C8_INT_LCM(p, 'z', '-', 't', 'f',
+						    'w', '-', 's', 'e')
+				   && C4_INT_LCM(p + 8, 'q', 'n', 'u', 'm')))
+			{
+				parser->_i_st = Req_HdrZ_Tfw_SeqNumV;
+				__FSM_MOVE_n(RGen_OWS, 13);
+			}
+			__FSM_MOVE(Req_HdrZ);
 		default:
 			__FSM_JMP(RGen_HdrOther);
 		}
@@ -2699,6 +2833,11 @@ tfw_http_parse_req(void *req_data, unsigned char *data, size_t len)
 	__TFW_HTTP_PARSE_SPECHDR_VAL(Req_HdrCookieV, Req_I_CookieStart,
 				     msg, __req_parse_cookie,
 				     TFW_HTTP_HDR_COOKIE, 0);
+
+	/* 'ZTfw-Seq_Number:*OWS' is read, process field-value. */
+	__TFW_HTTP_PARSE_SPECHDR_VAL(Req_HdrZ_Tfw_SeqNumV, I_ZTfwSeqNum,
+				     msg, __parse_z_tfw_seqnum,
+				     TFW_HTTP_HDR_Z_TFW_SEQNUM, 0);
 
 	RGEN_HDR_OTHER();
 	RGEN_OWS();
@@ -3038,6 +3177,20 @@ tfw_http_parse_req(void *req_data, unsigned char *data, size_t len)
 	__FSM_TX_AF(Req_HdrCooki, 'e', Req_HdrCookie, RGen_HdrOther);
 	__FSM_TX_AF_OWS(Req_HdrCookie, ':', Req_HdrCookieV, RGen_HdrOther);
 
+	/* ZTfw-Seq-Number header processing. */
+	__FSM_TX_AF(Req_HdrZ, '-', Req_HdrZ_, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_, 't', Req_HdrZ_T, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_T, 'f', Req_HdrZ_Tf, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tf, 'w', Req_HdrZ_Tfw, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw, '-', Req_HdrZ_Tfw_, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw_, 's', Req_HdrZ_Tfw_S, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw_S, 'e', Req_HdrZ_Tfw_Se, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw_Se, 'q', Req_HdrZ_Tfw_Seq, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw_Seq, 'n', Req_HdrZ_Tfw_SeqN, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw_SeqN, 'u', Req_HdrZ_Tfw_SeqNu, RGen_HdrOther);
+	__FSM_TX_AF(Req_HdrZ_Tfw_SeqNu, 'm', Req_HdrZ_Tfw_SeqNum, RGen_HdrOther);
+	__FSM_TX_AF_OWS(Req_HdrZ_Tfw_SeqNum, ':', Req_HdrZ_Tfw_SeqNumV, RGen_HdrOther);
+
 	}
 	__FSM_FINISH(req);
 
@@ -3159,6 +3312,19 @@ enum {
 	Resp_HdrTransfer_Encodin,
 	Resp_HdrTransfer_Encoding,
 	Resp_HdrTransfer_EncodingV,
+	Resp_HdrZ,
+	Resp_HdrZ_,
+	Resp_HdrZ_T,
+	Resp_HdrZ_Tf,
+	Resp_HdrZ_Tfw,
+	Resp_HdrZ_Tfw_,
+	Resp_HdrZ_Tfw_S,
+	Resp_HdrZ_Tfw_Se,
+	Resp_HdrZ_Tfw_Seq,
+	Resp_HdrZ_Tfw_SeqN,
+	Resp_HdrZ_Tfw_SeqNu,
+	Resp_HdrZ_Tfw_SeqNum,
+	Resp_HdrZ_Tfw_SeqNumV,
 	Resp_HdrDone,
 
 	Resp_BodyUnlimStart,
@@ -3966,6 +4132,19 @@ tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len)
 				__FSM_MOVE_n(RGen_OWS, 18);
 			}
 			__FSM_MOVE(Resp_HdrT);
+		case 'z':
+			if (likely(__data_available(p, 13)
+				   && *(p + 1) == '-'
+				   && *(p + 5) == '-'
+				   && *(p + 12) == ':'
+				   && C8_INT_LCM(p, 'z', '-', 't', 'f',
+						    'w', '-', 's', 'e')
+				   && C4_INT_LCM(p + 8, 'q', 'n', 'u', 'm')))
+			{
+				parser->_i_st = Resp_HdrZ_Tfw_SeqNumV;
+				__FSM_MOVE_n(RGen_OWS, 13);
+			}
+			__FSM_MOVE(Resp_HdrZ);
 		default:
 			__FSM_JMP(RGen_HdrOther);
 		}
@@ -4039,6 +4218,11 @@ tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len)
 	TFW_HTTP_PARSE_SPECHDR_VAL(Resp_HdrTransfer_EncodingV, I_TransEncod,
 				   msg, __parse_transfer_encoding,
 				   TFW_HTTP_HDR_TRANSFER_ENCODING);
+
+	/* 'ZTfw-Seq_Number:*OWS' is read, process field-value. */
+	__TFW_HTTP_PARSE_SPECHDR_VAL(Resp_HdrZ_Tfw_SeqNumV, I_ZTfwSeqNum,
+				     msg, __parse_z_tfw_seqnum,
+				     TFW_HTTP_HDR_Z_TFW_SEQNUM, 0);
 
 	RGEN_HDR_OTHER();
 	RGEN_OWS();
@@ -4197,6 +4381,20 @@ tfw_http_parse_resp(void *resp_data, unsigned char *data, size_t len)
 	__FSM_TX_AF(Resp_HdrTransfer_Encodi, 'n', Resp_HdrTransfer_Encodin, RGen_HdrOther);
 	__FSM_TX_AF(Resp_HdrTransfer_Encodin, 'g', Resp_HdrTransfer_Encoding, RGen_HdrOther);
 	__FSM_TX_AF_OWS(Resp_HdrTransfer_Encoding, ':', Resp_HdrTransfer_EncodingV, RGen_HdrOther);
+
+	/* ZTfw-Seq-Number header processing. */
+	__FSM_TX_AF(Resp_HdrZ, '-', Resp_HdrZ_, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_, 't', Resp_HdrZ_T, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_T, 'f', Resp_HdrZ_Tf, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tf, 'w', Resp_HdrZ_Tfw, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw, '-', Resp_HdrZ_Tfw_, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw_, 's', Resp_HdrZ_Tfw_S, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw_S, 'e', Resp_HdrZ_Tfw_Se, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw_Se, 'q', Resp_HdrZ_Tfw_Seq, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw_Seq, 'n', Resp_HdrZ_Tfw_SeqN, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw_SeqN, 'u', Resp_HdrZ_Tfw_SeqNu, RGen_HdrOther);
+	__FSM_TX_AF(Resp_HdrZ_Tfw_SeqNu, 'm', Resp_HdrZ_Tfw_SeqNum, RGen_HdrOther);
+	__FSM_TX_AF_OWS(Resp_HdrZ_Tfw_SeqNum, ':', Resp_HdrZ_Tfw_SeqNumV, RGen_HdrOther);
 
 	}
 	__FSM_FINISH(resp);

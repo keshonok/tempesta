@@ -41,6 +41,7 @@ tempesta_fw-objs = \
 	http_parser.o \
 	http_sess.o \
 	main.o \
+	msgtrc.o \
 	pool.o \
 	procfs.o \
 	sched.o \

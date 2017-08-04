@@ -27,6 +27,7 @@
 #include "http_msg.h"
 #include "http_sess.h"
 #include "log.h"
+#include "msgtrc.h"
 #include "procfs.h"
 #include "server.h"
 #include "tls.h"
@@ -625,6 +626,7 @@ tfw_http_req_evict_timeout(TfwSrvConn *srv_conn, TfwServer *srv,
 		TFW_DBG2("%s: Eviction: req=[%p] overdue=[%dms]\n",
 			 __func__, req,
 			 jiffies_to_msecs(jqage - srv->sg->max_jqage));
+		tfw_msgtrc_req_event(req, TFW_MTR_EVICT_TIMEOUT);
 		tfw_http_req_error(srv_conn, req, equeue, 504,
 				   "request evicted: timed out");
 		return true;
@@ -643,6 +645,7 @@ tfw_http_req_evict_retries(TfwSrvConn *srv_conn, TfwServer *srv,
 	if (unlikely(req->retries++ >= srv->sg->max_refwd)) {
 		TFW_DBG2("%s: Eviction: req=[%p] retries=[%d]\n",
 			 __func__, req, req->retries);
+		tfw_msgtrc_req_event(req, TFW_MTR_EVICT_RETRIES);
 		tfw_http_req_error(srv_conn, req, equeue, 504,
 				   "request evicted: the number"
 				   " of retries exceeded");
@@ -672,6 +675,7 @@ tfw_http_req_fwd_send(TfwSrvConn *srv_conn, TfwServer *srv,
 	if (tfw_connection_send((TfwConn *)srv_conn, (TfwMsg *)req)) {
 		TFW_DBG2("%s: Forwarding error: conn=[%p] req=[%p]\n",
 			 __func__, srv_conn, req);
+		tfw_msgtrc_req_event(req, TFW_MTR_FWD_SEND_ERROR);
 		tfw_http_req_error(srv_conn, req, equeue, 500,
 				   "request dropped: forwarding error");
 		return false;
@@ -768,6 +772,7 @@ tfw_http_req_fwd(TfwSrvConn *srv_conn,
 	BUG_ON(!(TFW_CONN_TYPE(srv_conn) & Conn_Srv));
 
 	spin_lock(&srv_conn->fwd_qlock);
+	tfw_msgtrc_req_event(req, TFW_MTR_IN_FWD_QUEUE);
 	list_add_tail(&req->fwd_list, &srv_conn->fwd_queue);
 	srv_conn->qsize++;
 	if (tfw_http_req_is_nip(req))
@@ -805,6 +810,7 @@ tfw_http_conn_treatnip(TfwSrvConn *srv_conn, struct list_head *equeue)
 	{
 		BUG_ON(list_empty(&req_sent->nip_list));
 		srv_conn->msg_sent = __tfw_http_conn_msg_sent_prev(srv_conn);
+		tfw_msgtrc_req_event(req_sent, TFW_MTR_FWD_CANT_NIP);
 		tfw_http_req_error(srv_conn, req_sent, equeue, 504,
 				   "request dropped: non-idempotent requests"
 				   " are not re-forwarded or re-scheduled");
@@ -966,6 +972,7 @@ tfw_http_conn_collect(TfwSrvConn *srv_conn, struct list_head *sch_queue,
 	 */
 	list_for_each_entry_safe(req, tmp, fwd_queue, fwd_list) {
 		tfw_http_req_delist(srv_conn, req);
+		tfw_msgtrc_req_event(req, TFW_MTR_RESCHED);
 		list_add_tail(&req->fwd_list, sch_queue);
 	}
 	BUG_ON(srv_conn->qsize);
@@ -999,6 +1006,7 @@ tfw_http_conn_resched(struct list_head *sch_queue, struct list_head *equeue)
 	list_for_each_entry_safe(req, tmp, sch_queue, fwd_list) {
 		if (!(sch_conn = tfw_sched_get_srv_conn((TfwMsg *)req))) {
 			TFW_DBG("Unable to find a backend server\n");
+			tfw_msgtrc_req_event(req, TFW_MTR_RESCHED_NO_BACKEND);
 			__tfw_http_req_error(req, equeue, 502,
 					     "request dropped: unable to find"
 					     " an available back end server");
@@ -1156,6 +1164,13 @@ tfw_http_conn_msg_alloc(TfwConn *conn)
 	if (unlikely(!hm))
 		return NULL;
 
+	if (TFW_CONN_TYPE(conn) & Conn_Clnt) {
+		if (tfw_msgtrc_req_add((TfwHttpReq *)hm)) {
+			tfw_http_msg_free(hm);
+			return NULL;
+		}
+	}
+
 	hm->conn = conn;
 	tfw_connection_get(conn);
 
@@ -1231,6 +1246,12 @@ tfw_http_conn_init(TfwConn *conn)
 			set_bit(TFW_CONN_B_RESEND, &srv_conn->flags);
 			TFW_INC_STAT_BH(serv.conn_restricted);
 		}
+	} else {
+		int ret;
+
+		if ((ret = tfw_msgtrc_conn_add((TfwCliConn *)conn)))
+			return ret;
+		tfw_msgtrc_conn_add_trace((TfwCliConn *)conn);
 	}
 	tfw_gfsm_state_init(&conn->state, conn, TFW_HTTP_FSM_INIT);
 	return 0;
@@ -1275,6 +1296,7 @@ tfw_http_conn_release(TfwConn *conn)
 
 	list_for_each_entry_safe(req, tmp, &zap_queue, fwd_list) {
 		tfw_http_req_delist(srv_conn, req);
+		tfw_msgtrc_req_event(req, TFW_MTR_CONN_RELEASE);
 		if (unlikely(!list_empty_careful(&req->msg.seq_list))) {
 			spin_lock(&((TfwCliConn *)req->conn)->seq_qlock);
 			if (unlikely(!list_empty(&req->msg.seq_list)))
@@ -1563,6 +1585,18 @@ tfw_http_add_x_forwarded_for(TfwHttpMsg *hm)
 	return r;
 }
 
+static int
+tfw_http_add_z_tfw_seqnum(TfwHttpMsg *hm)
+{
+	char *buf = *this_cpu_ptr(&g_buf);
+	int buf_len = snprintf(buf, RESP_BUF_LEN - 1,
+			       "%lu %lu", hm->seqnum_conn, hm->seqnum_req);
+
+	return tfw_http_msg_hdr_xfrm(hm, "Z-Tfw-SeqNum",
+				     sizeof("Z-Tfw-SeqNum") - 1, buf, buf_len,
+				     TFW_HTTP_HDR_Z_TFW_SEQNUM, false);
+}
+
 /**
  * Adjust the request before proxying it to real server.
  */
@@ -1582,6 +1616,9 @@ tfw_http_adjust_req(TfwHttpReq *req)
 
 	r = tfw_http_msg_del_hbh_hdrs(hm);
 	if (r < 0)
+		return r;
+
+	if ((r = tfw_http_add_z_tfw_seqnum(hm)))
 		return r;
 
 	return tfw_http_set_hdr_connection(hm, TFW_HTTP_CONN_KA);
@@ -1905,6 +1942,8 @@ tfw_http_req_add_seq_queue(TfwHttpReq *req)
 	struct list_head *seq_queue = &cli_conn->seq_queue;
 
 	tfw_http_req_mark_nip(req);
+	tfw_msgtrc_req_add_trace(req);
+	tfw_msgtrc_req_reg_seqnum(req);
 
 	spin_lock(&cli_conn->seq_qlock);
 	req_prev = list_empty(seq_queue) ?
@@ -2217,6 +2256,7 @@ tfw_http_popreq(TfwHttpMsg *hmresp)
 		TFW_WARN("Paired request missing, "
 			 "HTTP Response Splitting attack?\n");
 		TFW_INC_STAT_BH(serv.msgs_otherr);
+		tfw_msgtrc_req_trace((TfwHttpResp *)hmresp);
 		return NULL;
 	}
 	req = list_first_entry(fwd_queue, TfwHttpReq, fwd_list);
@@ -2224,6 +2264,7 @@ tfw_http_popreq(TfwHttpMsg *hmresp)
 		srv_conn->msg_sent = NULL;
 	tfw_http_req_delist(srv_conn, req);
 	tfw_http_conn_nip_delist(srv_conn);
+	tfw_msgtrc_req_event(req, TFW_MTR_POPREQ);
 	/*
 	 * Run special processing if the connection is in repair
 	 * mode. Otherwise, forward pending requests to the server.
@@ -2454,6 +2495,13 @@ tfw_http_resp_process(TfwConn *conn, struct sk_buff *skb, unsigned int off)
 				 & (TFW_HTTP_CHUNKED | TFW_HTTP_VOID_BODY))
 			       && (hmresp->content_length != hmresp->body.len));
 		}
+
+		/*
+		 * Make sure that seqnum values for the connection and
+		 * for the message are set correctly in the response.
+		 */
+		if (!tfw_msgtrc_resp_reg_seqnum((TfwHttpResp *)hmresp))
+			return TFW_BLOCK;
 
 		/*
 		 * Pass the response to GFSM for further processing.

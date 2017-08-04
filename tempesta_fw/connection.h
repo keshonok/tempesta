@@ -147,6 +147,7 @@ typedef struct {
 	struct list_head	seq_queue;
 	spinlock_t		seq_qlock;
 	spinlock_t		ret_qlock;
+	void			*msgtrc;
 } TfwCliConn;
 
 /*

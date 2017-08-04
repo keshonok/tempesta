@@ -182,6 +182,7 @@ typedef enum {
 	TFW_HTTP_HDR_USER_AGENT,
 	TFW_HTTP_HDR_SERVER = TFW_HTTP_HDR_USER_AGENT,
 	TFW_HTTP_HDR_COOKIE,
+	TFW_HTTP_HDR_Z_TFW_SEQNUM,
 
 	/* End of list of singular header. */
 	TFW_HTTP_HDR_NONSINGULAR,
@@ -277,6 +278,10 @@ typedef struct {
 #define __TFW_HTTP_CONN_MASK		(TFW_HTTP_CONN_CLOSE | TFW_HTTP_CONN_KA)
 #define TFW_HTTP_CONN_EXTRA		0x000004
 #define TFW_HTTP_CHUNKED		0x000008
+#define TFW_HTTP_SEQNUM_CONN		0x000010
+#define TFW_HTTP_SEQNUM_REQ		0x000020
+#define TFW_HTTP_SEQNUM			\
+	(TFW_HTTP_SEQNUM_CONN | TFW_HTTP_SEQNUM_REQ)
 
 /* Request flags */
 #define TFW_HTTP_HAS_STICKY		0x000100
@@ -318,6 +323,8 @@ typedef struct {
  *			  allowed. Use atomic operations if concurrent
  *			  updates are possible;
  * @content_length	- the value of Content-Length header field;
+ * @seqnum_conn		- connection sequence number;
+ * @seqnum_req		- request/response pair sequence number;
  * @keep_alive		- the value of timeout specified in Keep-Alive header;
  * @conn		- connection which the message was received on;
  * @destructor		- called when a connection is destroyed;
@@ -347,6 +354,8 @@ typedef struct {
 	unsigned char	version;					\
 	unsigned int	flags;						\
 	unsigned long	content_length;					\
+	unsigned long	seqnum_conn;					\
+	unsigned long	seqnum_req;					\
 	unsigned int	keep_alive;					\
 	TfwConn		*conn;						\
 	void (*destructor)(void *msg);					\
@@ -408,6 +417,7 @@ typedef struct {
 	unsigned long		tm_bchunk;
 	unsigned long		hash;
 	TfwHttpMsg		*resp;
+	void			*msgtrc;
 	unsigned short		retries;
 } TfwHttpReq;
 

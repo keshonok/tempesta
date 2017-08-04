@@ -26,6 +26,7 @@
 #define tfw_apm_stats	test_tfw_apm_stats
 
 #include "apm.c"
+#include "msgtrc.c"
 #include "vhost.c"
 
 int test_fail_counter;
