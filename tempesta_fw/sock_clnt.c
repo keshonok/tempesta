@@ -76,6 +76,14 @@ tfw_cli_conn_alloc(int type)
 	INIT_LIST_HEAD(&cli_conn->seq_queue);
 	spin_lock_init(&cli_conn->seq_qlock);
 	spin_lock_init(&cli_conn->ret_qlock);
+#ifdef CONFIG_LOCKDEP
+	/*
+	 * The lock is acquired at only one place where there is no conflict
+	 * with the socket lock, so prevent LOCKDEP complaining the dependency.
+	 */
+	lockdep_init_map(&cli_conn->ret_qlock.dep_map, "cli_conn->ret_qlock",
+			 &__lockdep_no_validate__, SINGLE_DEPTH_NESTING);
+#endif
 
 	setup_timer(&cli_conn->timer,
 		    tfw_sock_cli_keepalive_timer_cb,
@@ -579,14 +587,14 @@ tfw_sock_clnt_stop(void)
 		ss_release(ls->sk);
 		ls->sk = NULL;
 	}
-	ss_wait_listeners();
+	ss_wait_newconn();
 
 	/*
 	 * Now all listening sockets are closed, so no new connections
 	 * can appear. Close all established client connections.
-	 * We're going to acquie client hash bucket and peer connection list
-	 * locks, so disable softiqs to avoid deadlock with the sockets closing
-	 * in softiq context.
+	 * We're going to acquire client hash bucket and peer connection
+	 * list locks, so disable SoftIRQs to avoid a deadlock with the
+	 * process of closing sockets in softiq context.
 	 */
 	local_bh_disable();
 	while (tfw_client_for_each(tfw_cli_conn_close_all)) {
