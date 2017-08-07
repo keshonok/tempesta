@@ -183,6 +183,7 @@ tfw_srv_conn_need_resched(TfwSrvConn *srv_conn)
 /* Server group routines. */
 TfwSrvGroup *tfw_sg_lookup(const char *name);
 TfwSrvGroup *tfw_sg_new(const char *name, gfp_t flags);
+void tfw_sg_init(TfwSrvGroup *sg);
 int tfw_sg_add(TfwSrvGroup *sg);
 void tfw_sg_del(TfwSrvGroup *sg);
 void tfw_sg_free(TfwSrvGroup *sg);

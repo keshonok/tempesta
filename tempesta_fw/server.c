@@ -88,6 +88,14 @@ tfw_sg_lookup(const char *name)
 }
 EXPORT_SYMBOL(tfw_sg_lookup);
 
+void
+tfw_sg_init(TfwSrvGroup *sg)
+{
+	INIT_LIST_HEAD(&sg->list);
+	INIT_LIST_HEAD(&sg->srv_list);
+	rwlock_init(&sg->lock);
+}
+
 /**
  * Create a new Server Group.
  *
@@ -102,13 +110,10 @@ tfw_sg_new(const char *name, gfp_t flags)
 
 	TFW_DBG("Create new server group: '%s'\n", name);
 
-	sg = kzalloc(sizeof(*sg) + name_size, flags);
-	if (!sg)
+	if (!(sg = kzalloc(sizeof(*sg) + name_size, flags)))
 		return NULL;
 
-	INIT_LIST_HEAD(&sg->list);
-	INIT_LIST_HEAD(&sg->srv_list);
-	rwlock_init(&sg->lock);
+	tfw_sg_init(sg);
 	memcpy(sg->name, name, name_size);
 
 	return sg;
