@@ -144,15 +144,12 @@ tfw_sg_add(TfwSrvGroup *sg)
 
 /**
  * Remove a Server Group from the list.
- * This function is called only when Tempesta is stopping.
  */
 void
 tfw_sg_del(TfwSrvGroup *sg)
 {
-	BUG_ON(list_empty_careful(&sg->list));
-
 	write_lock(&sg_lock);
-	list_del(&sg->list);
+	list_del_init(&sg->list);
 	write_unlock(&sg_lock);
 }
 
@@ -198,19 +195,54 @@ tfw_sg_add_srv(TfwSrvGroup *sg, TfwServer *srv)
 	write_unlock(&sg->lock);
 }
 
-int
-tfw_sg_set_sched(TfwSrvGroup *sg, const char *sched_name)
+void
+tfw_sg_del_srv(TfwSrvGroup *sg, TfwServer *srv)
 {
-	TfwScheduler *s = tfw_sched_lookup(sched_name);
+	BUG_ON(!srv->sg);
 
-	if (!s)
-		return -EINVAL;
+	TFW_DBG2("Remove a backend server\n");
+	write_lock(&sg->lock);
+	list_del_init(&srv->list);
+	--sg->srv_n;
+	write_unlock(&sg->lock);
+}
 
-	sg->sched = s;
-	if (s->add_grp)
-		return s->add_grp(sg);
+TfwScheduler *
+tfw_sg_lnk_sched(TfwSrvGroup *sg, const char *name)
+{
+	BUG_ON(sg->sched);
+	return (sg->sched = tfw_sched_lookup(name));
+}
 
-	return 0;
+void *
+tfw_sg_set_sched(TfwSrvGroup *sg, void *arg)
+{
+	void *data;
+
+	BUG_ON(!sg->sched);
+	BUG_ON(sg->sched_data);
+	BUG_ON(!sg->sched->gen_data);
+	BUG_ON(!sg->sched->set_data);
+
+	if ((data = sg->sched->gen_data(sg, arg)))
+		sg->sched->set_data(sg, data);
+
+	return data;
+}
+
+void
+tfw_sg_del_sched(TfwSrvGroup *sg)
+{
+	void *data;
+
+	BUG_ON(!sg->sched);
+	BUG_ON(!sg->sched_data);
+	BUG_ON(!sg->sched->set_data);
+	BUG_ON(!sg->sched->del_data);
+
+	data = sg->sched->set_data(sg, NULL);
+	sg->sched->del_data(data);
+	sg->sched = NULL;
 }
 
 static int
@@ -246,6 +278,20 @@ tfw_sg_for_each_srv(int (*cb)(TfwServer *srv))
 	return ret;
 }
 
+int
+tfw_sg_for_each_sg(int (*cb)(TfwSrvGroup *sg))
+{
+	int ret = 0;
+	TfwSrvGroup *sg;
+
+	write_lock(&sg_lock);
+	list_for_each_entry(sg, &sg_list, list)
+		if ((ret = cb(sg)))
+			break;
+	write_unlock(&sg_lock);
+	return ret;
+}
+
 /**
  * Release a single server group with servers.
  */
@@ -254,8 +300,7 @@ tfw_sg_release(TfwSrvGroup *sg)
 {
 	TfwServer *srv, *srv_tmp;
 
-	if (sg->sched && sg->sched->del_grp)
-		sg->sched->del_grp(sg);
+	tfw_sg_del_sched(sg);
 	list_for_each_entry_safe(srv, srv_tmp, &sg->srv_list, list)
 		tfw_server_destroy(srv);
 	kfree(sg);

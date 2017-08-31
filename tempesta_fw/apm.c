@@ -1015,30 +1015,37 @@ cleanup:
 	return NULL;
 }
 
-int
-tfw_apm_add_srv(TfwServer *srv)
+void *
+tfw_apm_gen_data(TfwServer *srv)
 {
+	return tfw_apm_create();
+}
+
+void *
+tfw_apm_set_data(TfwServer *srv, void *apmref)
+{
+	void *old_apmref;
 	TfwApmData *data;
 
-	BUG_ON(srv->apmref);
+	BUG_ON(!srv);
+	old_apmref = srv->apmref;
+	data = srv->apmref = apmref;
 
-	if (!(data = tfw_apm_create()))
-		return -ENOMEM;
+	if (!data)
+		return old_apmref;
 
 	/* Start the timer for the percentile calculation. */
 	set_bit(TFW_APM_DATA_F_REARM, &data->flags);
 	setup_timer(&data->timer, tfw_apm_prcntl_tmfn, (unsigned long)data);
 	mod_timer(&data->timer, jiffies + TFW_APM_TIMER_INTVL);
 
-	srv->apmref = data;
-
-	return 0;
+	return old_apmref;
 }
 
 void
-tfw_apm_del_srv(TfwServer *srv)
+tfw_apm_del_data(void *apmref)
 {
-	TfwApmData *data = srv->apmref;
+	TfwApmData *data = apmref;
 
 	if (!data)
 		return;
@@ -1049,6 +1056,12 @@ tfw_apm_del_srv(TfwServer *srv)
 	del_timer_sync(&data->timer);
 
 	tfw_apm_destroy(data);
+}
+
+void
+tfw_apm_del_srv(TfwServer *srv)
+{
+	tfw_apm_del_data(srv->apmref);
 	srv->apmref = NULL;
 }
 
@@ -1061,7 +1074,7 @@ tfw_apm_del_srv(TfwServer *srv)
 #define TFW_APM_MIN_TMINTRVL	5	/* Minimum time interval (secs). */
 
 static int
-tfw_apm_cfgfin(void)
+tfw_apm_cfgend(void)
 {
 	unsigned int jtmwindow;
 
@@ -1108,6 +1121,9 @@ tfw_apm_cfgfin(void)
 static void
 tfw_cfgop_cleanup_apm(TfwCfgSpec *cs)
 {
+	if (tfw_runstate_is_reconfig())
+		return;
+
 	tfw_apm_jtmwindow = tfw_apm_tmwscale = 0;
 }
 
@@ -1159,7 +1175,7 @@ static TfwCfgSpec tfw_apm_specs[] = {
 
 TfwMod tfw_apm_mod = {
 	.name	= "apm",
-	.cfgfin	= tfw_apm_cfgfin,
+	.cfgend	= tfw_apm_cfgend,
 	.specs	= tfw_apm_specs,
 };
 

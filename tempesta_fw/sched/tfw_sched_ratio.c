@@ -641,10 +641,9 @@ tfw_sched_ratio_rtodata_put(struct rcu_head *rcup)
  * released in due time when all users of it are done and gone.
  */
 static void
-tfw_sched_ratio_calc_tmfn(TfwSrvGroup *sg,
+tfw_sched_ratio_calc_tmfn(TfwRatio *ratio,
 			  void (*calc_fn)(TfwRatio *, TfwRatioData *))
 {
-	TfwRatio *ratio = sg->sched_data;
 	TfwRatioData *crtodata, *nrtodata;
 
 	/*
@@ -654,8 +653,7 @@ tfw_sched_ratio_calc_tmfn(TfwSrvGroup *sg,
 	 * is a critical issue in itself.
 	 */
 	if (!(nrtodata = tfw_sched_ratio_rtodata_get(ratio))) {
-		TFW_ERR("Sched ratio: Insufficient memory for group '%s'\n",
-			sg->name);
+		TFW_ERR("Sched ratio: Insufficient memory\n");
 		goto rearm;
 	}
 
@@ -683,8 +681,8 @@ rearm:
 static void
 tfw_sched_ratio_dynamic_tmfn(unsigned long tmfn_data)
 {
-	tfw_sched_ratio_calc_tmfn((TfwSrvGroup *)tmfn_data,
-				   tfw_sched_ratio_calc_dynamic);
+	tfw_sched_ratio_calc_tmfn((TfwRatio *)tmfn_data,
+				  tfw_sched_ratio_calc_dynamic);
 }
 
 /**
@@ -693,8 +691,8 @@ tfw_sched_ratio_dynamic_tmfn(unsigned long tmfn_data)
 static void
 tfw_sched_ratio_predict_tmfn(unsigned long tmfn_data)
 {
-	tfw_sched_ratio_calc_tmfn((TfwSrvGroup *)tmfn_data,
-				   tfw_sched_ratio_calc_predict);
+	tfw_sched_ratio_calc_tmfn((TfwRatio *)tmfn_data,
+				  tfw_sched_ratio_calc_predict);
 }
 
 /*
@@ -960,55 +958,21 @@ rerun:
  * Release Ratio Scheduler data from a server group.
  */
 static void
-tfw_sched_ratio_cleanup(TfwSrvGroup *sg)
+tfw_sched_ratio_cleanup(TfwRatio *ratio)
 {
 	size_t si;
-	TfwRatio *ratio = sg->sched_data;
 
 	if (!ratio)
 		return;
 
 	/* Data that is shared between pool entries. */
-	for (si = 0; si < sg->srv_n; ++si)
+	for (si = 0; si < ratio->srv_n; ++si)
 		kfree(ratio->srvdesc[si].conn);
 
 	kfree(ratio->hstdata);
 	kfree(ratio->rtodata);
 
 	kfree(ratio);
-	sg->sched_data = NULL;
-}
-
-/**
- * Delete a server group from Ratio Scheduler.
- *
- * Note that at this time the group is inactive. That means there are no
- * attempts to schedule to servers in this group and enter RCU read-side
- * critical section. There's no need for synchronize_rcu() to wait for
- * expiration of an RCU grace period.
- */
-static void
-tfw_sched_ratio_del_grp(TfwSrvGroup *sg)
-{
-	TfwRatio *ratio = sg->sched_data;
-
-	/*
-	 * Make sure the timer doesn't re-arms itself. This
-	 * also ensures that no more RCU callbacks are created.
-	 */
-	if (sg->flags & (TFW_SG_F_SCHED_RATIO_DYNAMIC
-			 | TFW_SG_F_SCHED_RATIO_PREDICT))
-	{
-		atomic_set(&ratio->rearm, 0);
-		smp_mb__after_atomic();
-		del_timer_sync(&ratio->timer);
-	}
-
-	/* Wait for outstanding RCU callbacks to complete. */
-	rcu_barrier();
-
-	/* Release all memory allocated for the group. */
-	tfw_sched_ratio_cleanup(sg);
 }
 
 /**
@@ -1023,11 +987,10 @@ tfw_sched_ratio_del_grp(TfwSrvGroup *sg)
 
 /* Set up the upstream server descriptors. */
 static int
-tfw_sched_ratio_srvdesc_setup(TfwSrvGroup *sg)
+tfw_sched_ratio_srvdesc_setup(TfwSrvGroup *sg, TfwRatio *ratio)
 {
 	size_t size, si = 0, ci;
 	TfwServer *srv;
-	TfwRatio *ratio = sg->sched_data;
 	TfwRatioSrvDesc *srvdesc = ratio->srvdesc;
 
 	list_for_each_entry(srv, &sg->srv_list, list) {
@@ -1054,7 +1017,6 @@ tfw_sched_ratio_srvdesc_setup(TfwSrvGroup *sg)
 		srvdesc->conn_n = srv->conn_n;
 		srvdesc->srv = srv;
 		atomic64_set(&srvdesc->counter, 0);
-		srv->sched_data = srvdesc;
 		++srvdesc;
 	}
 	if (unlikely(si != sg->srv_n))
@@ -1068,56 +1030,59 @@ tfw_sched_ratio_add_grp_common(TfwSrvGroup *sg)
 {
 	int ret;
 	size_t size;
+	void *data;
 	TfwRatio *ratio;
 	TfwRatioData *rtodata;
 
 	TFW_DBG2("%s: SG=[%s]\n", __func__, sg->name);
 
 	size = sizeof(TfwRatio) + sizeof(TfwRatioSrvDesc) * sg->srv_n;
-	if (!(sg->sched_data = kzalloc(size, GFP_KERNEL)))
-		return ERR_PTR(-ENOMEM);
+	if (!(data = kzalloc(size, GFP_KERNEL)))
+		return NULL;
 
-	ratio = sg->sched_data;
+	ratio = data;
 	ratio->srv_n = sg->srv_n;
 	ratio->psidx = sg->flags & TFW_SG_M_PSTATS_IDX;
 
 	ratio->srvdesc = (TfwRatioSrvDesc *)(ratio + 1);
-	if ((ret = tfw_sched_ratio_srvdesc_setup(sg)))
-		return ERR_PTR(ret);
+	if ((ret = tfw_sched_ratio_srvdesc_setup(sg, ratio)))
+		goto cleanup;
 
 	if (!(rtodata = tfw_sched_ratio_rtodata_get(ratio)))
-		return ERR_PTR(-ENOMEM);
+		goto cleanup;
 	rcu_assign_pointer(ratio->rtodata, rtodata);
 
 	return ratio;
+
+cleanup:
+	tfw_sched_ratio_cleanup(ratio);
+	return NULL;
 }
 
-static int
-tfw_sched_ratio_add_grp_static(TfwSrvGroup *sg)
+static TfwRatio *
+tfw_sched_ratio_gen_grp_static(TfwSrvGroup *sg)
 {
 	TfwRatio *ratio;
 
-	ratio = tfw_sched_ratio_add_grp_common(sg);
-	if (IS_ERR(ratio))
-		return PTR_ERR(ratio);
+	if (!(ratio = tfw_sched_ratio_add_grp_common(sg)))
+		return ratio;
 
 	/* Calculate the static ratio data for each server. */
 	tfw_sched_ratio_calc_static(ratio, ratio->rtodata);
 
-	return 0;
+	return ratio;
 }
 
-static int
-tfw_sched_ratio_add_grp_dynamic(TfwSrvGroup *sg)
+static TfwRatio *
+tfw_sched_ratio_gen_grp_dynamic(TfwSrvGroup *sg, void *arg)
 {
 	TfwRatio *ratio;
-	TfwSchrefPredict *schref = sg->sched_data;
+	TfwSchrefPredict *schref = arg;
 
 	TFW_DBG2("%s: SG=[%s]\n", __func__, sg->name);
 
-	ratio = tfw_sched_ratio_add_grp_common(sg);
-	if (IS_ERR(ratio))
-		return PTR_ERR(ratio);
+	if (!(ratio = tfw_sched_ratio_add_grp_common(sg)))
+		return ratio;
 
 	/* Set up the necessary workspace for predictive scheduler. */
 	if (sg->flags & TFW_SG_F_SCHED_RATIO_PREDICT) {
@@ -1133,7 +1098,7 @@ tfw_sched_ratio_add_grp_dynamic(TfwSrvGroup *sg)
 		       + sizeof(TfwRatioHstDesc) * sg->srv_n
 		       + sizeof(TfwRatioHstUnit) * sg->srv_n * slot_n;
 		if (!(ratio->hstdata = kzalloc(size, GFP_KERNEL)))
-			return -ENOMEM;
+			goto cleanup;
 
 		hdata = ratio->hstdata;
 		hdata->hstdesc = (TfwRatioHstDesc *)(hdata + 1);
@@ -1155,60 +1120,179 @@ tfw_sched_ratio_add_grp_dynamic(TfwSrvGroup *sg)
 	 */
 	tfw_sched_ratio_calc_static(ratio, ratio->rtodata);
 
-	/* Set up periodic re-calculation of ratios. */
-	if (sg->flags & TFW_SG_F_SCHED_RATIO_DYNAMIC) {
+	if (sg->flags & TFW_SG_F_SCHED_RATIO_DYNAMIC)
 		ratio->intvl = TFW_SCHED_RATIO_INTVL;
-		atomic_set(&ratio->rearm, 1);
-		smp_mb__after_atomic();
-		setup_timer(&ratio->timer,
-			    tfw_sched_ratio_dynamic_tmfn, (unsigned long)sg);
-		mod_timer(&ratio->timer, jiffies + ratio->intvl);
-	} else if (sg->flags & TFW_SG_F_SCHED_RATIO_PREDICT) {
+	else if (sg->flags & TFW_SG_F_SCHED_RATIO_PREDICT)
 		ratio->intvl = msecs_to_jiffies(1000 / schref->rate);
-		atomic_set(&ratio->rearm, 1);
-		smp_mb__after_atomic();
-		setup_timer(&ratio->timer,
-			    tfw_sched_ratio_predict_tmfn, (unsigned long)sg);
-		mod_timer(&ratio->timer, jiffies + ratio->intvl);
-	}
 
-	return 0;
+	return ratio;
+
+cleanup:
+	tfw_sched_ratio_cleanup(ratio);
+	return NULL;
 }
 
-static int
-tfw_sched_ratio_add_grp(TfwSrvGroup *sg)
+static void
+tfw_sched_ratio_run_timers(TfwSrvGroup *sg)
 {
-	int ret;
+	TfwRatio *ratio;
+
+	if (sg->flags & TFW_SG_F_SCHED_RATIO_STATIC)
+		return;
+
+	rcu_read_lock();
+	ratio = rcu_dereference(sg->sched_data);
+
+	/* Set up periodic re-calculation of ratios. */
+	if (sg->flags & TFW_SG_F_SCHED_RATIO_DYNAMIC) {
+		setup_timer(&ratio->timer,
+			    tfw_sched_ratio_dynamic_tmfn,
+			    (unsigned long)ratio);
+	} else if (sg->flags & TFW_SG_F_SCHED_RATIO_PREDICT) {
+		setup_timer(&ratio->timer,
+			    tfw_sched_ratio_predict_tmfn,
+			    (unsigned long)ratio);
+	}
+	atomic_set(&ratio->rearm, 1);
+	smp_mb__after_atomic();
+	mod_timer(&ratio->timer, jiffies + ratio->intvl);
+
+	rcu_read_unlock();
+}
+
+/**
+ * Release scheduler data that belonged to a server group.
+ *
+ */
+/**
+ * Delete a server group from Ratio Scheduler.
+ *
+ * Note that at this time the group is inactive. That means there are no
+ * attempts to schedule to servers in this group and enter RCU read-side
+ * critical section. There's no need for synchronize_rcu() to wait for
+ * expiration of an RCU grace period.
+ */
+static void
+tfw_sched_ratio_del_data(void *data)
+{
+	TfwRatio *ratio = data;
+
+	/*
+	 * Make sure the data is fully detached, and the server
+	 * group where it formely was is using a replacement.
+	 */
+	synchronize_rcu();
+
+	/*
+	 * Make sure the timer doesn't re-arms itself. This
+	 * also ensures that no more RCU callbacks are created.
+	 */
+	if (ratio->timer.function) {
+		atomic_set(&ratio->rearm, 0);
+		smp_mb__after_atomic();
+		del_timer_sync(&ratio->timer);
+	}
+
+	/* Wait for outstanding RCU callbacks to complete. */
+	rcu_barrier();
+
+	/* Release all memory allocated for the group. */
+	tfw_sched_ratio_cleanup(data);
+}
+
+static void *
+tfw_sched_ratio_set_data(TfwSrvGroup *sg, void *data)
+{
+	TfwServer *srv;
+	TfwRatioSrvDesc *srvdesc;
+	void *this_data;
+
+	BUG_ON(!sg);
+	BUG_ON(!data && !rcu_dereference(sg->sched_data));
+	BUG_ON(data && (sg->srv_n != ((TfwRatio *)data)->srv_n));
+
+	this_data = rcu_dereference(sg->sched_data);
+	srvdesc = data ? NULL : ((TfwRatio *)data)->srvdesc;
+
+	list_for_each_entry(srv, &sg->srv_list, list) {
+		rcu_assign_pointer(srv->sched_data, srvdesc);
+		++srvdesc;
+	}
+	rcu_assign_pointer(sg->sched_data, data);
+
+	tfw_sched_ratio_run_timers(sg);
+
+	return this_data;
+}
+
+static void *
+tfw_sched_ratio_get_data(TfwSrvGroup *sg)
+{
+	BUG_ON(!sg);
+	return rcu_dereference(sg->sched_data);
+}
+
+static void *
+tfw_sched_ratio_chk_data(TfwSrvGroup *sg, void *data)
+{
+	TfwServer *srv;
+	TfwRatioSrvDesc *srvdesc;
+	TfwSrvConn **conn, *srv_conn;
+
+	BUG_ON(!sg);
+	BUG_ON(!data);
+
+	if (sg->srv_n != ((TfwRatio *)data)->srv_n)
+		return NULL;
+
+	srvdesc = ((TfwRatio *)data)->srvdesc;
+
+	list_for_each_entry(srv, &sg->srv_list, list) {
+		if (srvdesc->srv != srv)
+			return NULL;
+		if (srvdesc->conn_n != srv->conn_n)
+			return NULL;
+		conn = srvdesc->conn;
+		list_for_each_entry(srv_conn, &srv->conn_list, list)
+			if (unlikely(*conn++ != srv_conn))
+				return NULL;
+		++srvdesc;
+	}
+
+	return data;
+}
+
+static void *
+tfw_sched_ratio_gen_data(TfwSrvGroup *sg, void *arg)
+{
+	TfwRatio *ratio = NULL;
 
 	if (unlikely(!sg->srv_n || list_empty(&sg->srv_list)))
-		return -EINVAL;
+		return NULL;
 
-	switch (sg->flags & TFW_SG_M_SCHED_RATIO_TYPE) {
+	switch (sg->flags & TFW_SG_M_SCHED_RATIO) {
 	case TFW_SG_F_SCHED_RATIO_STATIC:
-		if ((ret = tfw_sched_ratio_add_grp_static(sg)))
-			goto cleanup;
+		ratio = tfw_sched_ratio_gen_grp_static(sg);
 		break;
 	case TFW_SG_F_SCHED_RATIO_DYNAMIC:
 	case TFW_SG_F_SCHED_RATIO_PREDICT:
-		if ((ret = tfw_sched_ratio_add_grp_dynamic(sg)))
-			goto cleanup;
+		ratio = tfw_sched_ratio_gen_grp_dynamic(sg, arg);
 		break;
 	default:
-		return -EINVAL;
+		break;
 	}
 
-	return 0;
-
-cleanup:
-	tfw_sched_ratio_cleanup(sg);
-	return ret;
+	return ratio;
 }
 
 static TfwScheduler tfw_sched_ratio = {
 	.name		= "ratio",
 	.list		= LIST_HEAD_INIT(tfw_sched_ratio.list),
-	.add_grp	= tfw_sched_ratio_add_grp,
-	.del_grp	= tfw_sched_ratio_del_grp,
+	.gen_data	= tfw_sched_ratio_gen_data,
+	.chk_data	= tfw_sched_ratio_chk_data,
+	.get_data	= tfw_sched_ratio_get_data,
+	.set_data	= tfw_sched_ratio_set_data,
+	.del_data	= tfw_sched_ratio_del_data,
 	.sched_sg_conn	= tfw_sched_ratio_sched_sg_conn,
 	.sched_srv_conn	= tfw_sched_ratio_sched_srv_conn,
 };

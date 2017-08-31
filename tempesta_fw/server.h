@@ -51,7 +51,7 @@ typedef struct {
 	TFW_PEER_COMMON;
 	struct list_head	list;
 	TfwSrvGroup		*sg;
-	void			*sched_data;
+	void __rcu		*sched_data;
 	void			*apmref;
 	unsigned int		weight;
 	size_t			conn_n;
@@ -82,7 +82,7 @@ struct tfw_srv_group_t {
 	struct list_head	srv_list;
 	rwlock_t		lock;
 	TfwScheduler		*sched;
-	void			*sched_data;
+	void __rcu		*sched_data;
 	size_t			srv_n;
 	unsigned int		max_qsize;
 	unsigned int		max_refwd;
@@ -110,7 +110,7 @@ typedef struct {
 #define TFW_SG_F_SCHED_RATIO_STATIC	0x0010
 #define TFW_SG_F_SCHED_RATIO_DYNAMIC	0x0020
 #define TFW_SG_F_SCHED_RATIO_PREDICT	0x0040
-#define TFW_SG_M_SCHED_RATIO_TYPE	(TFW_SG_F_SCHED_RATIO_STATIC	\
+#define TFW_SG_M_SCHED_RATIO		(TFW_SG_F_SCHED_RATIO_STATIC	\
 					 | TFW_SG_F_SCHED_RATIO_DYNAMIC	\
 					 | TFW_SG_F_SCHED_RATIO_PREDICT)
 
@@ -147,8 +147,11 @@ typedef struct {
 struct tfw_scheduler_t {
 	const char		*name;
 	struct list_head	list;
-	int			(*add_grp)(TfwSrvGroup *sg);
-	void			(*del_grp)(TfwSrvGroup *sg);
+	void			*(*gen_data)(TfwSrvGroup *sg, void *arg);
+	void			*(*chk_data)(TfwSrvGroup *sg, void *data);
+	void			*(*get_data)(TfwSrvGroup *sg);
+	void			*(*set_data)(TfwSrvGroup *sg, void *data);
+	void			(*del_data)(void *data);
 	TfwSrvConn		*(*sched_grp)(TfwMsg *msg);
 	TfwSrvConn		*(*sched_sg_conn)(TfwMsg *msg, TfwSrvGroup *sg);
 	TfwSrvConn		*(*sched_srv_conn)(TfwMsg *msg, TfwServer *srv);
@@ -189,9 +192,20 @@ void tfw_sg_del(TfwSrvGroup *sg);
 void tfw_sg_free(TfwSrvGroup *sg);
 unsigned int tfw_sg_count(void);
 
+void *tfw_sg_gen_sched_data(TfwSrvGroup *sg, void *arg);
+void *tfw_sg_get_sched_data(TfwSrvGroup *sg);
+void *tfw_sg_set_sched_data(TfwSrvGroup *sg, void *schref);
+void *tfw_sg_del_sched_data(TfwSrvGroup *sg);
+
+TfwScheduler *tfw_sg_lnk_sched(TfwSrvGroup *sg, const char *name);
+void *tfw_sg_set_sched(TfwSrvGroup *sg, void *arg);
+void tfw_sg_del_sched(TfwSrvGroup *sg);
+
 void tfw_sg_add_srv(TfwSrvGroup *sg, TfwServer *srv);
-int tfw_sg_set_sched(TfwSrvGroup *sg, const char *sched);
+void tfw_sg_del_srv(TfwSrvGroup *sg, TfwServer *srv);
+
 int tfw_sg_for_each_srv(int (*cb)(TfwServer *srv));
+int tfw_sg_for_each_sg(int (*cb)(TfwSrvGroup *sg));
 void tfw_sg_release(TfwSrvGroup *sg);
 void tfw_sg_release_all(void);
 

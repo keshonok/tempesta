@@ -58,8 +58,11 @@ static const unsigned int tfw_pstats_ith[] = {
 	[TFW_PSTATS_IDX_P99] = 99,
 };
 
-int tfw_apm_add_srv(TfwServer *srv);
+void *tfw_apm_gen_data(TfwServer *srv);
+void *tfw_apm_set_data(TfwServer *srv, void *data);
+void tfw_apm_del_data(void *data);
 void tfw_apm_del_srv(TfwServer *srv);
+
 void tfw_apm_update(void *apmref, unsigned long jtstamp, unsigned long jrtime);
 int tfw_apm_stats(void *apmref, TfwPrcntlStats *pstats);
 int tfw_apm_stats_bh(void *apmref, TfwPrcntlStats *pstats);
